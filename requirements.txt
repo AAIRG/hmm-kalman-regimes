@@ -2,3 +2,8 @@ yfinance
 pandas
 numpy
 streamlit
+joblib
+pyyaml
+hmmlearn
+pykalman
+plotly

@@ -2,7 +2,10 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from typing import Optional
+import logging
 from .base_loader import BaseDataLoader
+
+logger = logging.getLogger(__name__)
 
 
 class YFinanceLoader(BaseDataLoader):
@@ -22,7 +25,13 @@ class YFinanceLoader(BaseDataLoader):
         Returns:
             A pandas DataFrame containing the downloaded data.
         """
+        logger.info(f"Fetching data for {symbol} from {start_date} to {end_date} via yfinance...")
         data: pd.DataFrame = yf.download(symbol, start=start_date, end=end_date, progress=False)
+        
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+            
+        logger.info(f"Successfully fetched {len(data)} rows for {symbol}.")
         return data
 
     def preprocess_data(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -39,16 +48,11 @@ class YFinanceLoader(BaseDataLoader):
         if data.empty:
             return data
 
-        # Use Adjusted Close for more accurate return calculation if available
         price_col: str = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
-        
-        # Isolate the price series
         prices: pd.Series = data[price_col]
 
-        # Calculate logarithmic returns: ln(P_t / P_{t-1})
         data['Log_Return'] = np.log(prices / prices.shift(1))
-        
-        # Drop rows where Log_Return is NaN (typically the first row)
         data = data.dropna(subset=['Log_Return'])
         
+        logger.info(f"Preprocessed {len(data)} rows (calculated log returns).")
         return data
