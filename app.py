@@ -16,7 +16,8 @@ from utils.evaluation import (
     calculate_max_drawdown,
     calculate_annualized_return,
     calculate_regime_statistics,
-    apply_regime_filter
+    apply_regime_filter,
+    build_regime_positions
 )
 from models.hmm import HiddenMarkovModel
 from models.kalman import KalmanFilterModel
@@ -154,6 +155,23 @@ def main() -> None:
     min_regime_days = st.sidebar.slider("Min Regime Confirmation (days)", min_value=1, max_value=10, value=1, step=1)
     st.sidebar.caption("Regime switch requires N consecutive days of the new signal.")
 
+    st.sidebar.header("Regime Quality Filters")
+    use_regime_filters = st.sidebar.checkbox("Skip Low-Quality Regimes (stay in Cash)", value=False)
+    min_abs_ann_return = 0.0
+    max_ann_volatility = float(np.inf)
+    min_abs_sharpe = 0.0
+    if use_regime_filters:
+        min_abs_ann_return = st.sidebar.slider(
+            "Min |Ann. Return| to trade (%)", min_value=0.0, max_value=30.0, value=5.0, step=1.0
+        ) / 100.0
+        max_ann_volatility = st.sidebar.slider(
+            "Max Ann. Volatility to trade (%)", min_value=5.0, max_value=150.0, value=60.0, step=5.0
+        ) / 100.0
+        min_abs_sharpe = st.sidebar.slider(
+            "Min |Sharpe| to trade", min_value=0.0, max_value=2.0, value=0.3, step=0.1
+        )
+        st.sidebar.caption("Regimes failing any test are held in Cash instead of forced Long/Short.")
+
     st.sidebar.header("Hyperparameter Tuning")
     run_tuning = st.sidebar.checkbox("Run Random Tuning Before Analysis", value=False)
     n_iter_tuning = 0
@@ -203,7 +221,7 @@ def main() -> None:
                 if run_tuning:
                     with st.spinner(f"Running Random Hyperparameter Tuning for HMM ({n_iter_tuning} iterations)..."):
                         param_grid = {
-                            "n_components": [2, 3, 4],
+                            "n_components": [3, 4, 5],
                             "covariance_type": ["full", "diag"],
                             "n_iter": [50, 100, 200]
                         }

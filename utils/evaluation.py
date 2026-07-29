@@ -91,6 +91,87 @@ def calculate_annualized_return(equity_curve: pd.Series) -> float:
     
     return (total_return ** (1 / years)) - 1
 
+def build_regime_positions(
+    returns: pd.Series,
+    regimes: np.ndarray,
+    n_components: int,
+    trading_direction: str = "Long & Short",
+    leverage: float = 1.0,
+    min_abs_ann_return: float = 0.0,
+    max_ann_volatility: float = np.inf,
+    min_abs_sharpe: float = 0.0
+) -> Tuple[dict, pd.DataFrame]:
+    """
+    Builds the regime -> position mapping from TRAINING data statistics only.
+
+    A regime is traded directionally (long if its mean return is positive, short
+    if negative) only when it passes all quality tests. Regimes that are too
+    noisy, too volatile, or statistically indistinguishable from flat are held
+    in Cash instead of being forced into a directional bet.
+
+    Args:
+        returns: Training-period returns (raw log returns).
+        regimes: Training-period regime labels, aligned with `returns`.
+        n_components: Total number of regimes the model can emit.
+        trading_direction: "Long & Short", "Long Only", or "Short Only".
+        leverage: Position size multiplier.
+        min_abs_ann_return: Minimum |annualized mean return| required to trade.
+        max_ann_volatility: Maximum annualized volatility allowed to trade.
+        min_abs_sharpe: Minimum |annualized Sharpe| required to trade.
+
+    Returns:
+        (positions dict, diagnostics DataFrame explaining each decision).
+    """
+    positions = {}
+    rows = []
+
+    for i in range(n_components):
+        mask = np.asarray(regimes) == i
+        count = int(mask.sum())
+
+        if count < 2:
+            positions[i] = 0.0
+            rows.append({
+                'Regime': i, 'Count': count, 'Ann. Mean Return': np.nan,
+                'Ann. Volatility': np.nan, 'Sharpe': np.nan,
+                'Position': 0.0, 'Decision': 'Cash',
+                'Reason': 'Not observed in training data'
+            })
+            continue
+
+        segment = returns[mask]
+        ann_return = segment.mean() * 252
+        ann_vol = segment.std() * np.sqrt(252)
+        sharpe = ann_return / ann_vol if ann_vol > 0 else 0.0
+
+        if abs(ann_return) < min_abs_ann_return:
+            position, decision, reason = 0.0, 'Cash', 'Mean return too close to zero'
+        elif ann_vol > max_ann_volatility:
+            position, decision, reason = 0.0, 'Cash', 'Volatility above limit'
+        elif abs(sharpe) < min_abs_sharpe:
+            position, decision, reason = 0.0, 'Cash', 'Risk-adjusted edge too weak'
+        else:
+            if ann_return > 0:
+                allowed = trading_direction in ("Long & Short", "Long Only")
+                position = (1.0 if allowed else 0.0) * leverage
+                decision = 'Long' if allowed else 'Cash'
+                reason = 'Bullish regime' if allowed else 'Long trades disabled'
+            else:
+                allowed = trading_direction in ("Long & Short", "Short Only")
+                position = (-1.0 if allowed else 0.0) * leverage
+                decision = 'Short' if allowed else 'Cash'
+                reason = 'Bearish regime' if allowed else 'Short trades disabled'
+
+        positions[i] = position
+        rows.append({
+            'Regime': i, 'Count': count, 'Ann. Mean Return': ann_return,
+            'Ann. Volatility': ann_vol, 'Sharpe': sharpe,
+            'Position': position, 'Decision': decision, 'Reason': reason
+        })
+
+    return positions, pd.DataFrame(rows).set_index('Regime')
+
+
 def apply_regime_filter(regimes: np.ndarray, min_days: int = 1) -> np.ndarray:
     """
     Confirmation filter: only switch regime after the model predicts the new
