@@ -99,7 +99,7 @@ def build_regime_positions(
     leverage: float = 1.0,
     min_abs_ann_return: float = 0.0,
     max_ann_volatility: float = np.inf,
-    min_abs_sharpe: float = 0.0
+    min_abs_tstat: float = 0.0
 ) -> Tuple[dict, pd.DataFrame]:
     """
     Builds the regime -> position mapping from TRAINING data statistics only.
@@ -109,6 +109,10 @@ def build_regime_positions(
     noisy, too volatile, or statistically indistinguishable from flat are held
     in Cash instead of being forced into a directional bet.
 
+    The t-statistic test is the key defence against noise: a genuinely flat
+    regime can easily show a large sample mean by chance, and |t| accounts for
+    sample size in a way that the Sharpe ratio alone does not.
+
     Args:
         returns: Training-period returns (raw log returns).
         regimes: Training-period regime labels, aligned with `returns`.
@@ -117,7 +121,7 @@ def build_regime_positions(
         leverage: Position size multiplier.
         min_abs_ann_return: Minimum |annualized mean return| required to trade.
         max_ann_volatility: Maximum annualized volatility allowed to trade.
-        min_abs_sharpe: Minimum |annualized Sharpe| required to trade.
+        min_abs_tstat: Minimum |t-statistic| of the regime mean vs zero.
 
     Returns:
         (positions dict, diagnostics DataFrame explaining each decision).
@@ -133,23 +137,27 @@ def build_regime_positions(
             positions[i] = 0.0
             rows.append({
                 'Regime': i, 'Count': count, 'Ann. Mean Return': np.nan,
-                'Ann. Volatility': np.nan, 'Sharpe': np.nan,
+                'Ann. Volatility': np.nan, 'Sharpe': np.nan, 't-stat': np.nan,
                 'Position': 0.0, 'Decision': 'Cash',
                 'Reason': 'Not observed in training data'
             })
             continue
 
         segment = returns[mask]
-        ann_return = segment.mean() * 252
-        ann_vol = segment.std() * np.sqrt(252)
+        daily_mean = segment.mean()
+        daily_std = segment.std()
+        ann_return = daily_mean * 252
+        ann_vol = daily_std * np.sqrt(252)
         sharpe = ann_return / ann_vol if ann_vol > 0 else 0.0
+        # t-stat of the mean against zero: mean / (std / sqrt(n))
+        tstat = daily_mean / (daily_std / np.sqrt(count)) if daily_std > 0 else 0.0
 
         if abs(ann_return) < min_abs_ann_return:
             position, decision, reason = 0.0, 'Cash', 'Mean return too close to zero'
         elif ann_vol > max_ann_volatility:
             position, decision, reason = 0.0, 'Cash', 'Volatility above limit'
-        elif abs(sharpe) < min_abs_sharpe:
-            position, decision, reason = 0.0, 'Cash', 'Risk-adjusted edge too weak'
+        elif abs(tstat) < min_abs_tstat:
+            position, decision, reason = 0.0, 'Cash', 'Mean not statistically distinct from zero'
         else:
             if ann_return > 0:
                 allowed = trading_direction in ("Long & Short", "Long Only")
@@ -165,7 +173,7 @@ def build_regime_positions(
         positions[i] = position
         rows.append({
             'Regime': i, 'Count': count, 'Ann. Mean Return': ann_return,
-            'Ann. Volatility': ann_vol, 'Sharpe': sharpe,
+            'Ann. Volatility': ann_vol, 'Sharpe': sharpe, 't-stat': tstat,
             'Position': position, 'Decision': decision, 'Reason': reason
         })
 

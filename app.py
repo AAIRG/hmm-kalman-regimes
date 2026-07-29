@@ -159,7 +159,7 @@ def main() -> None:
     use_regime_filters = st.sidebar.checkbox("Skip Low-Quality Regimes (stay in Cash)", value=False)
     min_abs_ann_return = 0.0
     max_ann_volatility = float(np.inf)
-    min_abs_sharpe = 0.0
+    min_abs_tstat = 0.0
     if use_regime_filters:
         min_abs_ann_return = st.sidebar.slider(
             "Min |Ann. Return| to trade (%)", min_value=0.0, max_value=30.0, value=5.0, step=1.0
@@ -167,10 +167,13 @@ def main() -> None:
         max_ann_volatility = st.sidebar.slider(
             "Max Ann. Volatility to trade (%)", min_value=5.0, max_value=150.0, value=60.0, step=5.0
         ) / 100.0
-        min_abs_sharpe = st.sidebar.slider(
-            "Min |Sharpe| to trade", min_value=0.0, max_value=2.0, value=0.3, step=0.1
+        min_abs_tstat = st.sidebar.slider(
+            "Min |t-stat| of regime mean", min_value=0.0, max_value=4.0, value=2.0, step=0.1
         )
-        st.sidebar.caption("Regimes failing any test are held in Cash instead of forced Long/Short.")
+        st.sidebar.caption(
+            "Regimes failing any test are held in Cash. |t| ≈ 2 means the regime's "
+            "mean return is distinguishable from zero at roughly 95% confidence."
+        )
 
     st.sidebar.header("Hyperparameter Tuning")
     run_tuning = st.sidebar.checkbox("Run Random Tuning Before Analysis", value=False)
@@ -271,18 +274,25 @@ def main() -> None:
                 if model.history:
                     st.plotly_chart(plot_convergence(model.history), use_container_width=True)
                 
-                means = [
-                    train_data['Log_Return'][regimes[:split_idx] == i].mean() 
-                    if np.sum(regimes[:split_idx] == i) > 0 else -np.inf 
-                    for i in range(n_comp)
-                ]
-                
-                regime_positions = {}
-                for i, m in enumerate(means):
-                    if m > 0:
-                        regime_positions[i] = (1 if trading_direction in ["Long & Short", "Long Only"] else 0) * leverage
-                    else:
-                        regime_positions[i] = (-1 if trading_direction in ["Long & Short", "Short Only"] else 0) * leverage
+                regime_positions, regime_decisions = build_regime_positions(
+                    returns=train_data['Log_Return'],
+                    regimes=regimes[:split_idx],
+                    n_components=n_comp,
+                    trading_direction=trading_direction,
+                    leverage=leverage,
+                    min_abs_ann_return=min_abs_ann_return,
+                    max_ann_volatility=max_ann_volatility,
+                    min_abs_tstat=min_abs_tstat
+                )
+
+                st.write("### Regime Trading Decisions (learned from Training data)")
+                st.dataframe(regime_decisions.style.format({
+                    'Ann. Mean Return': '{:.2%}',
+                    'Ann. Volatility': '{:.2%}',
+                    'Sharpe': '{:.2f}',
+                    't-stat': '{:.2f}',
+                    'Position': '{:.2f}'
+                }, na_rep='—'), use_container_width=True)
                 
                 st.write(f"*(Evaluating on {'**In-Sample**' if train_size_pct == 100 else '**Out-of-Sample Test**'} Data)*")
                 bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions, transaction_cost)
@@ -340,18 +350,30 @@ def main() -> None:
                 
                 st.plotly_chart(plot_price_with_regimes(raw_data.loc[clean_data.index], regimes, "Combined Model", split_date=split_date), use_container_width=True)
                 
-                means = [
-                    smoothed_returns.iloc[:split_idx][regimes[:split_idx] == i].mean() 
-                    if np.sum(regimes[:split_idx] == i) > 0 else -np.inf 
-                    for i in range(n_comp)
-                ]
-                
-                regime_positions = {}
-                for i, m in enumerate(means):
-                    if m > 0:
-                        regime_positions[i] = (1 if trading_direction in ["Long & Short", "Long Only"] else 0) * leverage
-                    else:
-                        regime_positions[i] = (-1 if trading_direction in ["Long & Short", "Short Only"] else 0) * leverage
+                # Regimes come from the smoothed series, but position decisions must be
+                # based on RAW returns: smoothing shrinks volatility and would inflate
+                # the t-statistic, defeating the quality filters. Raw returns are also
+                # what the strategy actually earns.
+                regime_positions, regime_decisions = build_regime_positions(
+                    returns=train_data['Log_Return'],
+                    regimes=regimes[:split_idx],
+                    n_components=n_comp,
+                    trading_direction=trading_direction,
+                    leverage=leverage,
+                    min_abs_ann_return=min_abs_ann_return,
+                    max_ann_volatility=max_ann_volatility,
+                    min_abs_tstat=min_abs_tstat
+                )
+
+                st.write("### Regime Trading Decisions (learned from Training data)")
+                st.caption("Regimes detected on Kalman-smoothed returns; statistics and decisions computed on raw returns.")
+                st.dataframe(regime_decisions.style.format({
+                    'Ann. Mean Return': '{:.2%}',
+                    'Ann. Volatility': '{:.2%}',
+                    'Sharpe': '{:.2f}',
+                    't-stat': '{:.2f}',
+                    'Position': '{:.2f}'
+                }, na_rep='—'), use_container_width=True)
                 
                 st.write(f"*(Evaluating on {'**In-Sample**' if train_size_pct == 100 else '**Out-of-Sample Test**'} Data)*")
                 bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions, transaction_cost)
