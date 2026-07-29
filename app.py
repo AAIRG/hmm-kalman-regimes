@@ -11,11 +11,12 @@ from data.api_loader import YFinanceLoader
 from utils.logger import setup_logging
 from utils.config import load_config, save_config
 from utils.evaluation import (
-    backtest_regime_strategy, 
-    calculate_sharpe_ratio, 
-    calculate_max_drawdown, 
-    calculate_annualized_return, 
-    calculate_regime_statistics
+    backtest_regime_strategy,
+    calculate_sharpe_ratio,
+    calculate_max_drawdown,
+    calculate_annualized_return,
+    calculate_regime_statistics,
+    apply_regime_filter
 )
 from models.hmm import HiddenMarkovModel
 from models.kalman import KalmanFilterModel
@@ -148,6 +149,10 @@ def main() -> None:
         ["Long & Short", "Long Only", "Short Only"]
     )
     leverage = st.sidebar.slider("Leverage", min_value=1.0, max_value=5.0, value=1.0, step=0.5)
+    transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps)", min_value=0, max_value=50, value=10, step=1)
+    transaction_cost = transaction_cost_bps / 10000.0
+    min_regime_days = st.sidebar.slider("Min Regime Confirmation (days)", min_value=1, max_value=10, value=1, step=1)
+    st.sidebar.caption("Regime switch requires N consecutive days of the new signal.")
 
     st.sidebar.header("Hyperparameter Tuning")
     run_tuning = st.sidebar.checkbox("Run Random Tuning Before Analysis", value=False)
@@ -211,7 +216,7 @@ def main() -> None:
                         app_config["models"] = model_cfg
                         # save_config(app_config, "app_config.yaml") # Disabled to prevent Streamlit rerun
                         st.success(f"Tuning complete! Selected parameters: {best_params}")
-                        st.info("Updated `app_config.yaml` with the new optimal parameters.")
+                        st.info("Parameters applied to current session (not saved to disk).")
 
                 hmm_params = model_cfg.get("hmm", {})
                 n_comp = hmm_params.get("n_components", 2)
@@ -223,7 +228,15 @@ def main() -> None:
                         n_iter=hmm_params.get("n_iter", 100)
                     )
                     model.fit(train_data['Log_Return'])
-                    regimes = model.predict_regimes(clean_data['Log_Return'])
+                    # Predict train/test separately to avoid Viterbi look-ahead bias
+                    train_regimes = model.predict_regimes(train_data['Log_Return'])
+                    if train_size_pct < 100:
+                        test_regimes = model.predict_regimes(test_data['Log_Return'])
+                        regimes = np.concatenate([train_regimes, test_regimes])
+                    else:
+                        regimes = train_regimes
+                    # Apply regime confirmation filter to prevent whipsaw
+                    regimes = apply_regime_filter(regimes, min_regime_days)
                     eval_regimes = regimes[split_idx:] if train_size_pct < 100 else regimes
                     
                     Path("saved_models").mkdir(exist_ok=True)
@@ -254,16 +267,16 @@ def main() -> None:
                         regime_positions[i] = (-1 if trading_direction in ["Long & Short", "Short Only"] else 0) * leverage
                 
                 st.write(f"*(Evaluating on {'**In-Sample**' if train_size_pct == 100 else '**Out-of-Sample Test**'} Data)*")
-                bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions)
+                bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions, transaction_cost)
                 st.plotly_chart(plot_backtest(bt_df), use_container_width=True)
-                
+
                 st.write("### Backtest Performance")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Sharpe (B&H)", f"{calculate_sharpe_ratio(bt_df['Log_Return']):.2f}")
                 m2.metric("Sharpe (Strategy)", f"{calculate_sharpe_ratio(bt_df['Strategy_Return']):.2f}")
                 m3.metric("Max Drawdown", f"{calculate_max_drawdown(bt_df['Strategy_Equity']):.2%}")
                 m4.metric("Ann. Return", f"{calculate_annualized_return(bt_df['Strategy_Equity']):.2%}")
-                
+
                 st.write("### Regime Distribution Separation")
                 regime_stats = calculate_regime_statistics(eval_data['Log_Return'], eval_regimes)
                 st.dataframe(regime_stats.style.format({
@@ -296,7 +309,15 @@ def main() -> None:
                         n_iter=hmm_params.get("n_iter", 100)
                     )
                     hmm.fit(smoothed_returns.iloc[:split_idx])
-                    regimes = hmm.predict_regimes(smoothed_returns)
+                    # Predict train/test separately to avoid Viterbi look-ahead bias
+                    train_regimes = hmm.predict_regimes(smoothed_returns.iloc[:split_idx])
+                    if train_size_pct < 100:
+                        test_regimes = hmm.predict_regimes(smoothed_returns.iloc[split_idx:])
+                        regimes = np.concatenate([train_regimes, test_regimes])
+                    else:
+                        regimes = train_regimes
+                    # Apply regime confirmation filter to prevent whipsaw
+                    regimes = apply_regime_filter(regimes, min_regime_days)
                     eval_regimes = regimes[split_idx:] if train_size_pct < 100 else regimes
                 
                 st.plotly_chart(plot_price_with_regimes(raw_data.loc[clean_data.index], regimes, "Combined Model", split_date=split_date), use_container_width=True)
@@ -315,16 +336,16 @@ def main() -> None:
                         regime_positions[i] = (-1 if trading_direction in ["Long & Short", "Short Only"] else 0) * leverage
                 
                 st.write(f"*(Evaluating on {'**In-Sample**' if train_size_pct == 100 else '**Out-of-Sample Test**'} Data)*")
-                bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions)
+                bt_df = backtest_regime_strategy(eval_data['Log_Return'], eval_regimes, regime_positions, transaction_cost)
                 st.plotly_chart(plot_backtest(bt_df), use_container_width=True)
-                
+
                 st.write("### Backtest Performance")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Sharpe (B&H)", f"{calculate_sharpe_ratio(bt_df['Log_Return']):.2f}")
                 m2.metric("Sharpe (Strategy)", f"{calculate_sharpe_ratio(bt_df['Strategy_Return']):.2f}")
                 m3.metric("Max Drawdown", f"{calculate_max_drawdown(bt_df['Strategy_Equity']):.2%}")
                 m4.metric("Ann. Return", f"{calculate_annualized_return(bt_df['Strategy_Equity']):.2%}")
-                
+
                 st.write("### Regime Distribution Separation (Evaluated on Raw Returns)")
                 regime_stats = calculate_regime_statistics(eval_data['Log_Return'], eval_regimes)
                 st.dataframe(regime_stats.style.format({
@@ -350,7 +371,7 @@ def main() -> None:
                         app_config["models"] = model_cfg
                         # save_config(app_config, "app_config.yaml") # Disabled to prevent Streamlit rerun
                         st.success(f"Tuning complete! Selected parameters: {best_params}")
-                        st.info("Updated `app_config.yaml` with the new optimal parameters.")
+                        st.info("Parameters applied to current session (not saved to disk).")
 
                 kf_params = model_cfg.get("kalman", {})
                 with st.spinner("Training Kalman Filter via EM..."):

@@ -45,7 +45,7 @@ class KalmanFilterModel:
         self.model = self.model.em(X, n_iter=20)
         self.is_fitted = True
         
-        self.log_likelihood = self.model.loglikelihood(X).sum()
+        self.log_likelihood = self.model.loglikelihood(X)
         
         n_params = 6
         self.aic, self.bic = calculate_aic_bic(self.log_likelihood, n_params, len(data))
@@ -82,7 +82,8 @@ class KalmanFilterModel:
             )
             
             try:
-                ll = temp_model.loglikelihood(X).sum()
+                temp_model = temp_model.em(X, n_iter=10)
+                ll = temp_model.loglikelihood(X)
                 if ll > best_ll:
                     best_ll = ll
                     best_params = params

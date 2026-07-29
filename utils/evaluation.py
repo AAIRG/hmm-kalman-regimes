@@ -18,31 +18,42 @@ def calculate_aic_bic(log_likelihood: float, n_params: int, n_samples: int) -> T
     bic = n_params * np.log(n_samples) - 2 * log_likelihood
     return aic, bic
 
-def backtest_regime_strategy(returns: pd.Series, regimes: np.ndarray, regime_positions: dict) -> pd.DataFrame:
+def backtest_regime_strategy(returns: pd.Series, regimes: np.ndarray, regime_positions: dict, transaction_cost: float = 0.0) -> pd.DataFrame:
     """
     Simulates a regime-based long/short trading strategy.
-    
+
     Args:
         returns: A pandas Series of log returns.
         regimes: An array of predicted regimes (same length as returns).
-        regime_positions: A dictionary mapping regime index to target position 
-                          (1 for Long, -1 for Short, 0 for Cash).
+        regime_positions: A dictionary mapping regime index to target position
+                          (e.g., 1.0 for Long, -1.0 for Short, 0 for Cash; supports leverage).
+        transaction_cost: Proportional cost per unit of position change (e.g., 0.001 = 10 bps).
 
     Returns:
         A pandas DataFrame comparing Buy & Hold vs Regime Strategy.
     """
     df = pd.DataFrame({'Log_Return': returns, 'Regime': regimes}, index=returns.index)
-    
+
     # Map each regime to its corresponding position (defaulting to 0/cash if not found)
     df['Position'] = df['Regime'].map(regime_positions).fillna(0)
-    
+
     # Shift position by 1 day to avoid lookahead bias (you trade AT the close based on the signal)
     df['Position'] = df['Position'].shift(1).fillna(0)
-    
-    df['Strategy_Return'] = df['Position'] * df['Log_Return']
+
+    # Transaction cost on position changes (e.g., long→short = 2 units of turnover)
+    df['Trade'] = df['Position'].diff().abs().fillna(0)
+    df['TC'] = df['Trade'] * transaction_cost
+
+    # Accurate leveraged return: convert log→simple, apply position, convert back
+    simple_return = np.exp(df['Log_Return']) - 1
+    leveraged_simple_return = df['Position'] * simple_return - df['TC']
+    # Clip to prevent log of non-positive numbers (total wipeout with extreme leverage)
+    leveraged_simple_return = leveraged_simple_return.clip(lower=-0.9999)
+    df['Strategy_Return'] = np.log1p(leveraged_simple_return)
+
     df['Buy_Hold_Equity'] = np.exp(df['Log_Return'].cumsum())
     df['Strategy_Equity'] = np.exp(df['Strategy_Return'].cumsum())
-    
+
     return df
 
 def calculate_sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
@@ -79,6 +90,50 @@ def calculate_annualized_return(equity_curve: pd.Series) -> float:
         return -1.0 # Handle extreme edge cases
     
     return (total_return ** (1 / years)) - 1
+
+def apply_regime_filter(regimes: np.ndarray, min_days: int = 1) -> np.ndarray:
+    """
+    Confirmation filter: only switch regime after the model predicts the new
+    regime for at least `min_days` consecutive observations. Prevents whipsaw
+    trading from rapid regime flickering.
+
+    Args:
+        regimes: Array of predicted regime labels.
+        min_days: Number of consecutive days a new regime must be predicted
+                  before the switch is confirmed. 1 = no filtering.
+
+    Returns:
+        Filtered regime array with the same shape.
+    """
+    if min_days <= 1:
+        return regimes.copy()
+
+    filtered = regimes.copy()
+    current = filtered[0]
+    candidate = None
+    streak = 0
+
+    for i in range(1, len(filtered)):
+        if regimes[i] != current:
+            if regimes[i] == candidate:
+                streak += 1
+            else:
+                candidate = regimes[i]
+                streak = 1
+
+            if streak >= min_days:
+                current = candidate
+                candidate = None
+                streak = 0
+
+            filtered[i] = current
+        else:
+            candidate = None
+            streak = 0
+            filtered[i] = current
+
+    return filtered
+
 
 def calculate_regime_statistics(returns: pd.Series, regimes: np.ndarray) -> pd.DataFrame:
     """
